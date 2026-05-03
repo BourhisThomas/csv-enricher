@@ -1,36 +1,55 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# csv-enricher
 
-## Getting Started
+> Enrichis tes CSV de prospects ou d'entreprises B2B avec **Claude** ou **GPT** — apporte tes propres clés API, tout tourne en local.
 
-First, run the development server:
+Tu uploades un CSV, tu décris l'info que tu veux extraire/déduire en langage naturel, et l'app appelle Anthropic ou OpenAI pour remplir les colonnes manquantes ligne par ligne. Le LLM peut faire ses propres recherches web (via les outils `web_search` natifs d'Anthropic et OpenAI) — pas besoin de clé Exa, Serper, ou autre service tiers.
+
+## Quickstart
 
 ```bash
+git clone https://github.com/seeds-agency/csv-enricher
+cd csv-enricher
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Ouvre <http://localhost:3000>, va dans **Settings**, colle ta clé Anthropic ([console.anthropic.com](https://console.anthropic.com/settings/keys)) et/ou ta clé OpenAI ([platform.openai.com](https://platform.openai.com/api-keys)), uploade un CSV, écris ton instruction.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Comment ça marche
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **BYOK** : tes clés API vivent dans le `localStorage` de ton navigateur. Elles sont envoyées en header HTTP au backend Next.js (qui tourne en local), jamais persistées côté serveur.
+- **Modes** :
+  - *Prospect* — 1 ligne = 1 appel LLM
+  - *Entreprise* — déduplication par société (1 appel par entreprise unique, fan-out aux lignes partageant la même société)
+- **Web search** : si activé, le LLM peut appeler son outil `web_search` natif (Anthropic `web_search_20250305` server-side, ou OpenAI Responses API `web_search_preview`) pour vérifier des éléments sur le web avant de répondre.
+- **Output** : texte libre, nombre, ou booléen. Option "Reasoning" pour ajouter une colonne avec la source citée par le modèle.
 
-## Learn More
+Un `public/sample.csv` est fourni pour tester immédiatement.
 
-To learn more about Next.js, take a look at the following resources:
+## Stack
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- Next.js 16 (App Router) + React 19 + TypeScript
+- Tailwind CSS 4
+- `@anthropic-ai/sdk` + `openai` (Responses API)
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Limites
 
-## Deploy on Vercel
+- Cap par batch : 500 lignes (configurable dans `src/app/api/enrich/generate/route.ts`)
+- Concurrence : 3 appels LLM en parallèle (configurable dans `src/lib/enricher/generator.ts`)
+- L'app ne stocke rien : si tu fermes l'onglet pendant un run, tu perds les résultats partiels
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Déployer
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Vercel marche out-of-the-box. **Important** : ne configure **pas** de variable d'env avec ta clé API si tu déploies publiquement — le BYOK est conçu pour que chaque utilisateur fournisse sa propre clé via Settings.
+
+```bash
+vercel deploy
+```
+
+## License
+
+MIT — voir [LICENSE](./LICENSE).
+
+---
+
+Made by [seeds](https://seeds-agency.com) — agence growth & data B2B.

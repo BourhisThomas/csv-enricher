@@ -1,10 +1,10 @@
-import EnricherPage from '@/components/EnricherPage'
+import ApiKeysForm from '@/components/ApiKeysForm'
 import { ApiKeysProvider } from '@/components/ApiKeysProvider'
 
-export default function Home() {
+export default function SettingsPage() {
   return (
     <ApiKeysProvider>
-      <EnricherPage />
+      <ApiKeysForm />
     </ApiKeysProvider>
   )
 }
