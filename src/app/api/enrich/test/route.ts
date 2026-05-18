@@ -1,26 +1,33 @@
 import { runEnrichmentBatch, sampleForTest } from '@/lib/enricher/generator'
-import type {
-  EnrichmentStreamEvent,
-  CsvRow,
-  FieldMapping,
-  EnrichmentConfig,
+import {
+  getModelProvider,
+  isValidModelId,
+  type EnrichmentStreamEvent,
+  type CsvRow,
+  type FieldMapping,
+  type EnrichmentConfig,
 } from '@/lib/enricher/types'
 
 export const maxDuration = 120
 
 const TEST_SAMPLE_SIZE = 5
 
-function validateConfig(config: EnrichmentConfig | undefined): string | null {
+function validateConfig(
+  config: EnrichmentConfig | undefined,
+  mapping: FieldMapping | undefined,
+): string | null {
   if (!config) return 'missing_config'
   if (config.mode !== 'prospect' && config.mode !== 'company') return 'invalid_mode'
   if (!config.instruction || !config.instruction.trim()) return 'missing_instruction'
-  if (config.model !== 'claude-sonnet-4-6' && config.model !== 'gpt-4.1-mini') return 'invalid_model'
+  if (!isValidModelId(config.model)) return 'invalid_model'
+  if (config.exa_company_search && !mapping?.company_website) return 'exa_requires_company_website_mapping'
   return null
 }
 
 export async function POST(req: Request) {
   const anthropicKey = req.headers.get('x-anthropic-api-key') || undefined
   const openaiKey = req.headers.get('x-openai-api-key') || undefined
+  const exaKey = req.headers.get('x-exa-api-key') || undefined
 
   let body: { rows: CsvRow[]; mapping: FieldMapping; config: EnrichmentConfig }
   try {
@@ -32,14 +39,18 @@ export async function POST(req: Request) {
   const { rows, mapping, config } = body
   if (!rows?.length) return Response.json({ error: 'missing_rows' }, { status: 400 })
 
-  const configError = validateConfig(config)
+  const configError = validateConfig(config, mapping)
   if (configError) return Response.json({ error: configError }, { status: 400 })
 
-  if (config.model === 'claude-sonnet-4-6' && !anthropicKey) {
+  const provider = getModelProvider(config.model)
+  if (provider === 'anthropic' && !anthropicKey) {
     return Response.json({ error: 'missing_anthropic_key' }, { status: 400 })
   }
-  if (config.model === 'gpt-4.1-mini' && !openaiKey) {
+  if (provider === 'openai' && !openaiKey) {
     return Response.json({ error: 'missing_openai_key' }, { status: 400 })
+  }
+  if (config.exa_company_search && !exaKey) {
+    return Response.json({ error: 'missing_exa_key' }, { status: 400 })
   }
 
   const testRows = sampleForTest(rows, mapping, config.mode, TEST_SAMPLE_SIZE)
@@ -64,6 +75,7 @@ export async function POST(req: Request) {
         config,
         anthropicKey,
         openaiKey,
+        exaKey,
         onProgress: async (result, current, total) => {
           await send({ type: 'progress', current, total, result })
         },

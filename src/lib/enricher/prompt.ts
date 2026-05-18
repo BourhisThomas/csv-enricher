@@ -92,15 +92,30 @@ export function needsJson(config: EnrichmentConfig): boolean {
   return config.output_format !== 'text'
 }
 
-export function buildSystemPrompt(config: EnrichmentConfig): string {
+export function buildSystemPrompt(
+  config: EnrichmentConfig,
+  toolsAvailable: { native_web_search: boolean; exa_company_search: boolean } = {
+    native_web_search: false,
+    exa_company_search: false,
+  },
+): string {
   const subject =
     config.mode === 'company'
       ? 'une entreprise'
       : 'un prospect B2B (personne et son entreprise)'
 
-  const searchClause = config.web_search
-    ? '\n- Tu as accès à un outil web_search : utilise-le pour vérifier des éléments concrets sur le web (site de l\'entreprise, news récentes, profils publics) avant de conclure. Cite tes sources (URL, date) dans le reasoning quand demandé.'
-    : ''
+  const toolClauses: string[] = []
+  if (toolsAvailable.exa_company_search) {
+    toolClauses.push(
+      'Tu as accès à un outil `search_company_website(query)` qui recherche dans les pages publiques du site web de l\'entreprise (restreint à son domaine). APPELLE CET OUTIL pour vérifier des éléments concrets avant de conclure : services, équipe, pricing, case studies, offres d\'emploi, mentions légales, etc. Queries courtes et ciblées (1-3 mots clés). NE conclus JAMAIS "je ne peux pas accéder au site" sans avoir d\'abord essayé l\'outil — il est disponible et fonctionnel.',
+    )
+  }
+  if (toolsAvailable.native_web_search) {
+    toolClauses.push(
+      'Tu as accès à un outil `web_search` (recherche web générale, type SERP). Utilise-le pour des news récentes, profils publics, ou infos hors du site de l\'entreprise. Cite tes sources (URL, date) dans le reasoning quand demandé.',
+    )
+  }
+  const searchClause = toolClauses.length ? '\n- ' + toolClauses.join('\n- ') : ''
 
   const base = `Tu es un expert en recherche B2B. Ta mission est d'analyser rigoureusement les informations disponibles sur ${subject} et de répondre à l'instruction donnée.
 

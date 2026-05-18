@@ -1,10 +1,10 @@
+import { Suspense } from 'react'
 import EnricherPage from '@/components/EnricherPage'
-import { ApiKeysProvider } from '@/components/ApiKeysProvider'
 
 export default function Home() {
   return (
-    <ApiKeysProvider>
+    <Suspense fallback={null}>
       <EnricherPage />
-    </ApiKeysProvider>
+    </Suspense>
   )
 }

@@ -1,10 +1,15 @@
 'use client'
 
-import { useRef, useState } from 'react'
+import Link from 'next/link'
+import { useMemo, useRef, useState } from 'react'
+import { useApiKeys } from '@/components/ApiKeysProvider'
 import {
+  DEFAULT_MODEL,
   FIELD_LABELS,
+  MODEL_REGISTRY,
   PROSPECT_FIELDS,
   COMPANY_FIELDS,
+  getModel,
 } from '@/lib/enricher/types'
 import type {
   CsvRow,
@@ -21,9 +26,9 @@ function randomId(): string {
   return Math.random().toString(36).slice(2, 10)
 }
 
-function parseCSV(text: string): { headers: string[]; rows: CsvRow[] } {
+function parseCSV(text: string): { headers: string[]; rows: CsvRow[]; separator: string } {
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1)
-  if (!text) return { headers: [], rows: [] }
+  if (!text) return { headers: [], rows: [], separator: ',' }
 
   let firstLineEnd = text.length
   {
@@ -72,12 +77,12 @@ function parseCSV(text: string): { headers: string[]; rows: CsvRow[] } {
   }
   if (currentField !== '' || currentRow.length > 0) { pushField(); pushRow() }
 
-  if (parsed.length < 2) return { headers: [], rows: [] }
+  if (parsed.length < 2) return { headers: [], rows: [], separator }
   const headers = parsed[0]!
   const rows = parsed.slice(1).map(values => {
     return Object.fromEntries(headers.map((h, i) => [h, values[i] ?? '']))
   })
-  return { headers, rows }
+  return { headers, rows, separator }
 }
 
 function autoDetect(headers: string[]): FieldMapping {
@@ -120,24 +125,45 @@ interface Props {
   initialState?: InitialFormState | null
 }
 
+const REQUIRED_PROSPECT_FIELDS: FieldKey[] = ['prenom', 'nom']
+const REQUIRED_COMPANY_FIELDS: FieldKey[] = ['company']
+
 export default function EnricherForm({ onSubmit, disabled, initialState }: Props) {
+  const { anthropicKey, openaiKey, exaKey } = useApiKeys()
   const fileRef = useRef<HTMLInputElement>(null)
   const [headers, setHeaders] = useState<string[]>(initialState?.headers ?? [])
   const [rows, setRows] = useState<CsvRow[]>(initialState?.rows ?? [])
   const [fileName, setFileName] = useState(initialState?.fileName ?? '')
+  const [separator, setSeparator] = useState<string>(',')
   const [mapping, setMapping] = useState<FieldMapping>(initialState?.mapping ?? {})
 
   const [mode, setMode] = useState<EnrichmentMode>(initialState?.config.mode ?? 'prospect')
   const [instruction, setInstruction] = useState(initialState?.config.instruction ?? '')
   const [outputFormat, setOutputFormat] = useState<OutputFormat>(initialState?.config.output_format ?? 'text')
   const [customFields, setCustomFields] = useState<CustomInputField[]>(initialState?.config.custom_fields ?? [])
-  const [webSearch, setWebSearch] = useState(initialState?.config.web_search ?? true)
-  const [model, setModel] = useState<EnricherModel>(initialState?.config.model ?? 'claude-sonnet-4-6')
-  const [includeReasoning, setIncludeReasoning] = useState(initialState?.config.include_reasoning ?? false)
+  const [exaCompanySearch, setExaCompanySearch] = useState(initialState?.config.exa_company_search ?? false)
+  const [nativeWebSearch, setNativeWebSearch] = useState(initialState?.config.native_web_search ?? false)
+  const [model, setModel] = useState<EnricherModel>(initialState?.config.model ?? DEFAULT_MODEL)
+  const [includeReasoning, setIncludeReasoning] = useState(initialState?.config.include_reasoning ?? true)
   const [additionalNotes, setAdditionalNotes] = useState(initialState?.config.additional_notes ?? '')
 
   const [dragOver, setDragOver] = useState(false)
   const [parseError, setParseError] = useState('')
+
+  const availableModels = useMemo(
+    () =>
+      MODEL_REGISTRY.filter(m =>
+        m.provider === 'anthropic' ? !!anthropicKey : !!openaiKey,
+      ),
+    [anthropicKey, openaiKey],
+  )
+
+  const currentModelDescriptor = getModel(model)
+  const currentModelHasKey =
+    currentModelDescriptor?.provider === 'anthropic' ? !!anthropicKey : !!openaiKey
+  if (currentModelDescriptor && !currentModelHasKey && availableModels[0] && availableModels[0].id !== model) {
+    setModel(availableModels[0].id)
+  }
 
   function handleFile(file: File) {
     if (!file.name.endsWith('.csv')) {
@@ -156,6 +182,7 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
       setHeaders(parsed.headers)
       setRows(parsed.rows)
       setFileName(file.name)
+      setSeparator(parsed.separator)
       setMapping(autoDetect(parsed.headers))
     }
     reader.readAsText(file, 'UTF-8')
@@ -171,6 +198,14 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
   function handleFileInput(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0]
     if (file) handleFile(file)
+  }
+
+  function clearFile() {
+    setHeaders([])
+    setRows([])
+    setFileName('')
+    setMapping({})
+    if (fileRef.current) fileRef.current.value = ''
   }
 
   function updateFieldMapping(key: FieldKey, column: string) {
@@ -204,7 +239,8 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
       mode,
       instruction: instruction.trim(),
       output_format: outputFormat,
-      web_search: webSearch,
+      exa_company_search: exaCompanySearch,
+      native_web_search: nativeWebSearch,
       model,
       include_reasoning: includeReasoning,
       custom_fields: cleanedCustomFields,
@@ -215,23 +251,43 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
   }
 
   const visibleBuiltInFields: FieldKey[] = mode === 'company' ? COMPANY_FIELDS : [...PROSPECT_FIELDS, ...COMPANY_FIELDS]
+  const requiredFields = mode === 'company' ? REQUIRED_COMPANY_FIELDS : REQUIRED_PROSPECT_FIELDS
+  const mappedCount = visibleBuiltInFields.filter(k => mapping[k]).length
   const canSubmit = rows.length > 0 && !disabled && instruction.trim().length > 0
 
-  const sectionCls = 'border-t border-gray-200 pt-6 first:border-t-0 first:pt-0'
-  const sectionTitleCls = 'text-sm font-semibold uppercase tracking-wide text-gray-700 mb-3'
-  const labelCls = 'block text-sm font-medium text-gray-700 mb-1'
-  const inputCls = 'w-full px-3 py-2 border border-gray-300 rounded-md text-sm focus:outline-none focus:ring-2 focus:ring-black focus:border-black'
-  const selectCls = inputCls
-  const radioCardCls = (active: boolean) =>
-    `flex-1 flex items-start gap-3 p-3 border rounded-lg cursor-pointer transition ${active ? 'border-black bg-gray-50' : 'border-gray-200 hover:border-gray-400'}`
-
   return (
-    <form className="space-y-8 max-w-3xl mx-auto" onSubmit={handleSubmit}>
+    <form onSubmit={handleSubmit}>
+      {/* I · Source */}
+      <div className="section">
+        <h2><span className="n">I.</span>Source</h2>
+        <span className="meta">CSV · 1 000 lignes max</span>
+      </div>
 
-      <div className={sectionCls}>
-        <div className={sectionTitleCls}>1. Importer le CSV</div>
+      {fileName ? (
+        <div className="file-card">
+          <div className="glyph">CSV</div>
+          <div>
+            <div className="name">{fileName}</div>
+            <div className="desc">
+              {rows.length} lignes · séparateur «&nbsp;{separator}&nbsp;» · UTF-8
+            </div>
+          </div>
+          <div className="row-gap">
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm"
+              onClick={() => fileRef.current?.click()}
+            >
+              Changer
+            </button>
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearFile}>
+              Retirer
+            </button>
+          </div>
+        </div>
+      ) : (
         <div
-          className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition ${dragOver ? 'border-black bg-gray-50' : fileName ? 'border-green-500 bg-green-50' : 'border-gray-300 hover:border-gray-400'}`}
+          className={`drop ${dragOver ? 'dragover' : ''}`}
           onDragOver={e => { e.preventDefault(); setDragOver(true) }}
           onDragLeave={() => setDragOver(false)}
           onDrop={handleDrop}
@@ -240,151 +296,307 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
           tabIndex={0}
           onKeyDown={e => e.key === 'Enter' && fileRef.current?.click()}
         >
-          <input ref={fileRef} type="file" accept=".csv" className="hidden" onChange={handleFileInput} />
-          {fileName ? (
-            <div className="text-sm">
-              <span className="font-medium">{fileName}</span>
-              <span className="text-gray-500"> · {rows.length} lignes</span>
+          <div className="glyph">CSV</div>
+          <div>
+            <div className="ti">Dépose ton CSV</div>
+            <div className="desc">
+              jusqu&apos;à 1 000 lignes · <b>données 100% locales</b>
             </div>
-          ) : (
-            <div className="text-sm text-gray-600">
-              Glisse un fichier CSV ou <span className="underline">parcourir</span>
-            </div>
-          )}
+          </div>
+          <button type="button" className="btn btn-secondary" onClick={e => { e.stopPropagation(); fileRef.current?.click() }}>
+            Parcourir
+          </button>
         </div>
-        {parseError && <div className="mt-2 text-sm text-red-600">{parseError}</div>}
-      </div>
+      )}
+      <input ref={fileRef} type="file" accept=".csv" style={{ display: 'none' }} onChange={handleFileInput} />
+      {parseError && (
+        <div style={{ marginTop: 10, fontSize: 12.5, color: 'var(--cherry)' }}>{parseError}</div>
+      )}
 
       {headers.length > 0 && (
         <>
-          <div className={sectionCls}>
-            <div className={sectionTitleCls}>2. Type d&apos;enrichissement</div>
-            <div className="flex gap-3">
-              <label className={radioCardCls(mode === 'prospect')}>
-                <input type="radio" name="mode" value="prospect" checked={mode === 'prospect'} onChange={() => setMode('prospect')} className="mt-1" />
-                <div>
-                  <div className="font-medium text-sm">Prospect</div>
-                  <div className="text-xs text-gray-600">Recherche par personne (1 ligne = 1 enrichissement)</div>
-                </div>
-              </label>
-              <label className={radioCardCls(mode === 'company')}>
-                <input type="radio" name="mode" value="company" checked={mode === 'company'} onChange={() => setMode('company')} className="mt-1" />
-                <div>
-                  <div className="font-medium text-sm">Entreprise</div>
-                  <div className="text-xs text-gray-600">Déduplication par entreprise (1 appel par société unique)</div>
-                </div>
-              </label>
-            </div>
-
-            <div className="mt-6">
-              <div className={sectionTitleCls}>Mapper les champs</div>
-              <p className="text-xs text-gray-500 mb-3">Associe chaque champ à une colonne du CSV. Les champs non mappés sont ignorés.</p>
-              <div className="space-y-2">
-                {visibleBuiltInFields.map(key => (
-                  <div key={key} className="grid grid-cols-[180px_1fr] items-center gap-3">
-                    <label className="text-sm text-gray-700">{FIELD_LABELS[key]}</label>
-                    <select
-                      className={selectCls}
-                      value={mapping[key] ?? ''}
-                      onChange={e => updateFieldMapping(key, e.target.value)}
-                    >
-                      <option value="">— non mappé —</option>
-                      {headers.map(h => <option key={h} value={h}>{h}</option>)}
-                    </select>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="mt-6">
-              <div className={sectionTitleCls}>Champs personnalisés</div>
-              <p className="text-xs text-gray-500 mb-3">Colonnes additionnelles à passer en contexte au LLM (ex: secteur, taille).</p>
-              <div className="space-y-2">
-                {customFields.map(field => (
-                  <div key={field.id} className="grid grid-cols-[1fr_1fr_auto] gap-2">
-                    <input type="text" className={inputCls} placeholder="Libellé (ex: Secteur)" value={field.label} onChange={e => updateCustomField(field.id, { label: e.target.value })} />
-                    <select className={selectCls} value={field.column} onChange={e => updateCustomField(field.id, { column: e.target.value })}>
-                      <option value="">— colonne CSV —</option>
-                      {headers.map(h => <option key={h} value={h}>{h}</option>)}
-                    </select>
-                    <button type="button" onClick={() => removeCustomField(field.id)} className="px-2 text-gray-400 hover:text-red-600" aria-label="Supprimer">×</button>
-                  </div>
-                ))}
-                <button type="button" onClick={addCustomField} className="text-sm text-gray-600 hover:text-black underline">+ Ajouter un champ personnalisé</button>
-              </div>
-            </div>
+          {/* II · Cible */}
+          <div className="section">
+            <h2><span className="n">II.</span>Sur quoi porte la recherche ?</h2>
+            <span className="meta">détermine les colonnes à mapper</span>
           </div>
 
-          <div className={sectionCls}>
-            <div className={sectionTitleCls}>3. Instruction</div>
+          <div className="mode-picker">
+            <button
+              type="button"
+              className={`mode-card ${mode === 'prospect' ? 'active' : ''}`}
+              onClick={() => setMode('prospect')}
+              aria-pressed={mode === 'prospect'}
+            >
+              <span className="mode-title">Par prospect <span className="mode-sub">— une ligne, une recherche</span></span>
+              <span className="mode-desc">
+                chaque ligne est traitée individuellement. Idéal quand l&apos;info dépend de la personne (poste, ancienneté, profil LinkedIn).
+              </span>
+            </button>
+            <button
+              type="button"
+              className={`mode-card ${mode === 'company' ? 'active' : ''}`}
+              onClick={() => setMode('company')}
+              aria-pressed={mode === 'company'}
+            >
+              <span className="mode-title">Par entreprise <span className="mode-badge">dédup</span></span>
+              <span className="mode-desc">
+                regroupe les lignes par entreprise et ne fait qu&apos;une recherche par société (moins cher si plusieurs contacts par boîte).
+              </span>
+            </button>
+          </div>
+
+          {/* III · Mapping */}
+          <div className="section">
+            <h2><span className="n">III.</span>Mapping des colonnes</h2>
+            <span className="meta">
+              {headers.length} colonne{headers.length > 1 ? 's' : ''} détectée{headers.length > 1 ? 's' : ''} · {mappedCount} mappée{mappedCount > 1 ? 's' : ''}
+            </span>
+          </div>
+
+          <div className="mapping">
+            {visibleBuiltInFields.map(key => {
+              const column = mapping[key] ?? ''
+              const isRequired = requiredFields.includes(key)
+              const exaRequired = key === 'company_website' && exaCompanySearch
+              const sample = column ? (rows[0]?.[column] ?? '') : ''
+              return (
+                <div key={key} className="mapping-row">
+                  <span className={`csv ${column ? '' : 'empty'}`}>
+                    {column ? (
+                      <>
+                        &quot;{column}&quot;
+                        {sample && <span className="ex">{sample.slice(0, 24)}{sample.length > 24 ? '…' : ''}</span>}
+                      </>
+                    ) : (
+                      <>— non mappée —</>
+                    )}
+                  </span>
+                  <span className="arr">→</span>
+                  <span className="role">
+                    {FIELD_LABELS[key]}
+                    {column && <span className="auto">AUTO</span>}
+                    {!column && isRequired && <span className="miss">REQUIS</span>}
+                    {!column && exaRequired && <span className="miss">REQUIS POUR EXA</span>}
+                    {!column && !isRequired && !exaRequired && <span className="opt">optionnel</span>}
+                  </span>
+                  <select
+                    className="mapping-select"
+                    value={column}
+                    onChange={e => updateFieldMapping(key, e.target.value)}
+                  >
+                    <option value="">—</option>
+                    {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </div>
+              )
+            })}
+
+            {customFields.map(field => (
+              <div key={field.id} className="mapping-custom-row">
+                <input
+                  type="text"
+                  className="field"
+                  style={{ background: 'var(--paper-soft)', fontSize: 12.5, padding: '6px 10px' }}
+                  placeholder="Libellé (ex: Secteur)"
+                  value={field.label}
+                  onChange={e => updateCustomField(field.id, { label: e.target.value })}
+                />
+                <span className="arr">→</span>
+                <select
+                  className="mapping-select"
+                  value={field.column}
+                  onChange={e => updateCustomField(field.id, { column: e.target.value })}
+                >
+                  <option value="">— colonne CSV —</option>
+                  {headers.map(h => <option key={h} value={h}>{h}</option>)}
+                </select>
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => removeCustomField(field.id)}
+                >
+                  retirer
+                </button>
+              </div>
+            ))}
+
+            <button type="button" className="mapping-add" onClick={addCustomField}>
+              <span>+</span>
+              <span>ajouter un champ personnalisé</span>
+              <span style={{ marginLeft: 'auto', fontFamily: 'var(--font-mono)', fontSize: '10.5px', color: 'var(--ink-4)' }}>
+                passé au LLM en contexte
+              </span>
+            </button>
+          </div>
+
+          {/* IV · Instruction */}
+          <div className="section">
+            <h2><span className="n">IV.</span>Instruction</h2>
+            <span className="meta">1 à 3 phrases en langage naturel</span>
+          </div>
+
+          <div className="field-group">
             <textarea
-              className={inputCls}
-              placeholder="Ex: Détermine si l'entreprise a récemment annoncé une levée de fonds, un déménagement ou un événement interne. Réponds true/false."
+              className="field"
+              placeholder="Ex : Cette personne a-t-elle changé de poste au cours des six derniers mois ? Si oui, indique le nouveau rôle et la nouvelle entreprise. Vide si introuvable."
               value={instruction}
               onChange={e => setInstruction(e.target.value)}
-              rows={4}
             />
-            <div className="mt-3">
-              <label className={labelCls}>Format attendu</label>
-              <select className={selectCls} value={outputFormat} onChange={e => setOutputFormat(e.target.value as OutputFormat)}>
-                <option value="text">Texte libre</option>
-                <option value="number">Nombre</option>
-                <option value="boolean">Booléen (true / false)</option>
-              </select>
+          </div>
+
+          <div style={{ display: 'flex', gap: 18, marginTop: 14, alignItems: 'flex-end', flexWrap: 'wrap' }}>
+            <div className="field-group" style={{ flex: '0 0 auto' }}>
+              <span className="field-label">Format de sortie</span>
+              <div className="toggle">
+                <button type="button" className={outputFormat === 'text' ? 'active' : ''} onClick={() => setOutputFormat('text')}>Texte</button>
+                <button type="button" className={outputFormat === 'number' ? 'active' : ''} onClick={() => setOutputFormat('number')}>Nombre</button>
+                <button type="button" className={outputFormat === 'boolean' ? 'active' : ''} onClick={() => setOutputFormat('boolean')}>Booléen</button>
+              </div>
+            </div>
+            <div className="field-group" style={{ flex: 1, minWidth: 240 }}>
+              <span className="field-label">
+                Notes supplémentaires{' '}
+                <span style={{ textTransform: 'none', letterSpacing: 0, fontWeight: 500, color: 'var(--ink-4)' }}>
+                  (facultatif)
+                </span>
+              </span>
+              <input
+                className="field"
+                placeholder="ex : ignore tout ce qui date d'avant 2024"
+                value={additionalNotes}
+                onChange={e => setAdditionalNotes(e.target.value)}
+              />
             </div>
           </div>
 
-          <div className={sectionCls}>
-            <div className={sectionTitleCls}>4. Options</div>
-            <div className="space-y-3">
-              <label className={labelCls}>Modèle</label>
-              <div className="flex gap-3">
-                <label className={radioCardCls(model === 'claude-sonnet-4-6')}>
-                  <input type="radio" name="model" value="claude-sonnet-4-6" checked={model === 'claude-sonnet-4-6'} onChange={() => setModel('claude-sonnet-4-6')} className="mt-1" />
-                  <div>
-                    <div className="font-medium text-sm">Claude Sonnet 4.6</div>
-                    <div className="text-xs text-gray-600">Anthropic · plus précis</div>
-                  </div>
-                </label>
-                <label className={radioCardCls(model === 'gpt-4.1-mini')}>
-                  <input type="radio" name="model" value="gpt-4.1-mini" checked={model === 'gpt-4.1-mini'} onChange={() => setModel('gpt-4.1-mini')} className="mt-1" />
-                  <div>
-                    <div className="font-medium text-sm">GPT-4.1 mini</div>
-                    <div className="text-xs text-gray-600">OpenAI · plus rapide</div>
-                  </div>
-                </label>
+          {/* V · Paramètres */}
+          <div className="section">
+            <h2><span className="n">V.</span>Paramètres</h2>
+            <span className="meta">modèle · recherche · sortie</span>
+          </div>
+
+          <div className="field-group">
+            <span className="field-label">Modèle</span>
+            {availableModels.length === 0 ? (
+              <div style={{ fontSize: 12.5, color: 'var(--cherry)' }}>
+                Aucune clé API enregistrée — ajoute Anthropic ou OpenAI dans{' '}
+                <Link href="/settings">Réglages</Link> pour activer un modèle.
               </div>
+            ) : (
+              <div className="model-list">
+                {MODEL_REGISTRY.map(m => {
+                  const hasKey =
+                    m.provider === 'anthropic' ? !!anthropicKey : !!openaiKey
+                  const checked = model === m.id
+                  return (
+                    <label
+                      key={m.id}
+                      className={`model-option ${checked ? 'active' : ''} ${hasKey ? '' : 'disabled'} ${m.provider}`}
+                    >
+                      <input
+                        type="radio"
+                        name="enricher-model"
+                        value={m.id}
+                        checked={checked}
+                        disabled={!hasKey}
+                        onChange={() => setModel(m.id)}
+                      />
+                      <span className="model-name">
+                        {m.label}
+                        <span className="model-tier">{m.tier}</span>
+                      </span>
+                      <span className="model-hint">
+                        {hasKey ? m.hint : `clé ${m.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} manquante`}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            )}
+          </div>
 
-              <label className="flex items-center gap-2 mt-4 text-sm cursor-pointer">
-                <input type="checkbox" checked={webSearch} onChange={e => setWebSearch(e.target.checked)} />
-                <span>Activer la recherche web (web_search natif {model === 'claude-sonnet-4-6' ? 'Anthropic' : 'OpenAI'})</span>
-              </label>
-
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" checked={includeReasoning} onChange={e => setIncludeReasoning(e.target.checked)} />
-                <span>Ajouter une colonne &quot;Reasoning&quot; (1 phrase factuelle citant la source)</span>
-              </label>
-
-              <div className="mt-3">
-                <label className={labelCls}>Notes supplémentaires (optionnel)</label>
-                <textarea
-                  className={inputCls}
-                  placeholder="Ex: Ignore les résultats antérieurs à 2024."
-                  value={additionalNotes}
-                  onChange={e => setAdditionalNotes(e.target.value)}
-                  rows={2}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 28, marginTop: 22 }}>
+            <div className="stack-3">
+              <span className="field-label">Recherche web</span>
+              <label className={`switch ${mapping.company_website ? '' : 'disabled'}`}>
+                <input
+                  type="checkbox"
+                  checked={exaCompanySearch && !!mapping.company_website}
+                  disabled={!mapping.company_website}
+                  onChange={e => setExaCompanySearch(e.target.checked)}
                 />
-              </div>
+                <span className="track" />
+                <span className="body">
+                  <span className="lbl">Exa · site entreprise</span>
+                  <span className="hint">
+                    ~3× moins cher · cherche uniquement sur le domaine mappé
+                    {!mapping.company_website && (
+                      <> · <span style={{ color: 'var(--cherry)' }}>nécessite que «&nbsp;Site web entreprise&nbsp;» soit mappé</span></>
+                    )}
+                  </span>
+                </span>
+              </label>
+              {exaCompanySearch && mapping.company_website && !exaKey && (
+                <div style={{ fontSize: 12, color: 'var(--cherry)', marginLeft: 50 }}>
+                  ⚠ Aucune clé Exa configurée — ajoute-la dans{' '}
+                  <Link href="/settings">Réglages</Link>.
+                </div>
+              )}
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={nativeWebSearch}
+                  onChange={e => setNativeWebSearch(e.target.checked)}
+                />
+                <span className="track" />
+                <span className="body">
+                  <span className="lbl">Recherche web native</span>
+                  <span className="hint">
+                    couvre le web entier (news, profils) · plus cher (
+                    {getModel(model)?.provider === 'openai' ? '~0,025 €/appel' : '~0,01 €/appel'})
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div className="stack-3">
+              <span className="field-label">Sortie</span>
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={includeReasoning}
+                  onChange={e => setIncludeReasoning(e.target.checked)}
+                />
+                <span className="track" />
+                <span className="body">
+                  <span className="lbl">Colonne «&nbsp;reasoning&nbsp;»</span>
+                  <span className="hint">force le LLM à citer sa source en une phrase</span>
+                </span>
+              </label>
             </div>
           </div>
 
-          <button
-            type="submit"
-            disabled={!canSubmit}
-            className="w-full py-3 bg-black text-white rounded-md font-medium hover:bg-gray-800 disabled:bg-gray-300 disabled:cursor-not-allowed transition"
-          >
-            Tester sur {Math.min(5, rows.length)} {mode === 'company' ? 'entreprises' : 'lignes'}
-          </button>
+          {/* VI · Test & lancer */}
+          <div className="section">
+            <h2><span className="n">VI.</span>Test &amp; lancement</h2>
+            <span className="meta">test obligatoire avant le batch</span>
+          </div>
+
+          <div className="cost-panel">
+            <div>
+              <span className="lbl">Avant lancement</span>
+              <div className="val">test sur 5 lignes</div>
+              <div className="hint">
+                un aperçu gratuit (ou presque) pour vérifier la qualité avant le batch
+              </div>
+            </div>
+            <div className="ctas">
+              <button type="submit" disabled={!canSubmit} className="btn btn-primary btn-lg">
+                Tester sur {Math.min(5, rows.length)} {mode === 'company' ? 'entreprises' : 'lignes'} →
+              </button>
+            </div>
+          </div>
         </>
       )}
     </form>
