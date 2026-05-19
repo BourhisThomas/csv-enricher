@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import OpenAI from 'openai'
 import { buildUserPrompt, buildSystemPrompt, needsJson } from './prompt'
-import { searchCompanyWebsite, extractDomain, formatExaResultsForLLM, ExaFatalError } from './exa'
+import { searchExa, extractDomain, formatExaResultsForLLM, ExaFatalError } from './exa'
 import {
   emptyUsage,
   getModelProvider,
@@ -14,13 +14,65 @@ import {
   type OutputFormat,
 } from './types'
 
-const CONCURRENCY = 3
+const CONCURRENCY = 5
 const MAX_TOOL_ITERATIONS = 5
+
+function isOpenAIReasoningModel(modelId: string): boolean {
+  return /^gpt-5/.test(modelId)
+}
+
+async function runWithConcurrency(
+  total: number,
+  worker: (index: number) => Promise<void>,
+  concurrency: number,
+): Promise<void> {
+  let next = 0
+  const count = Math.min(concurrency, total)
+  const workers: Promise<void>[] = []
+  for (let w = 0; w < count; w++) {
+    workers.push((async () => {
+      while (true) {
+        const i = next++
+        if (i >= total) break
+        await worker(i)
+      }
+    })())
+  }
+  await Promise.all(workers)
+}
 const EXA_NUM_RESULTS = 5
 const EXA_TEXT_CHARS = 1500
-const EXA_TOOL_NAME = 'search_company_website'
-const EXA_TOOL_DESCRIPTION =
+const EXA_DOMAIN_TOOL_NAME = 'search_company_website'
+const EXA_DOMAIN_TOOL_DESCRIPTION =
   "Recherche dans les pages du site web officiel de l'entreprise (restreint à son domaine). À utiliser pour trouver des infos publiques sur l'entreprise (services, équipe, pricing, case studies). Queries courtes et ciblées."
+const EXA_WEB_TOOL_NAME = 'search_web'
+const EXA_WEB_TOOL_DESCRIPTION =
+  "Recherche web ouverte via Exa (sans restriction de domaine). À utiliser pour trouver des news récentes, articles, profils publics, ou informations hors du site officiel de l'entreprise. Queries courtes et ciblées."
+
+function extractJsonBlock(text: string): string {
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
+  if (fenced && fenced[1]) return fenced[1].trim()
+
+  const startIdx = text.indexOf('{')
+  if (startIdx === -1) return text.trim()
+
+  let depth = 0
+  let inString = false
+  let escape = false
+  for (let i = startIdx; i < text.length; i++) {
+    const ch = text[i]
+    if (escape) { escape = false; continue }
+    if (ch === '\\') { escape = true; continue }
+    if (ch === '"') { inString = !inString; continue }
+    if (inString) continue
+    if (ch === '{') depth++
+    else if (ch === '}') {
+      depth--
+      if (depth === 0) return text.slice(startIdx, i + 1).trim()
+    }
+  }
+  return text.slice(startIdx).trim()
+}
 
 function normalizeValue(v: unknown, format: OutputFormat): string {
   if (v === null || v === undefined) return negativeFor(format)
@@ -73,11 +125,29 @@ interface RunContext {
   systemPrompt: string
   userPrompt: string
   config: EnrichmentConfig
-  exaToolActive: boolean
+  exaDomainActive: boolean
+  exaWebActive: boolean
   companyDomain: string | null
   exaKey: string | null
   maxTokens: number
   usage: ApiUsage
+}
+
+async function callExa(
+  ctx: RunContext,
+  query: string,
+  domain: string | null,
+): Promise<string> {
+  if (!ctx.exaKey) throw new Error('Clé Exa manquante')
+  const results = await searchExa({
+    apiKey: ctx.exaKey,
+    query,
+    domain,
+    numResults: EXA_NUM_RESULTS,
+    textChars: EXA_TEXT_CHARS,
+  })
+  ctx.usage.exa_calls += 1
+  return formatExaResultsForLLM(results)
 }
 
 async function runAnthropic(anthropic: Anthropic, ctx: RunContext): Promise<string> {
@@ -85,10 +155,23 @@ async function runAnthropic(anthropic: Anthropic, ctx: RunContext): Promise<stri
   if (ctx.config.native_web_search) {
     tools.push({ type: 'web_search_20250305', name: 'web_search', max_uses: 5 })
   }
-  if (ctx.exaToolActive) {
+  if (ctx.exaDomainActive) {
     tools.push({
-      name: EXA_TOOL_NAME,
-      description: EXA_TOOL_DESCRIPTION,
+      name: EXA_DOMAIN_TOOL_NAME,
+      description: EXA_DOMAIN_TOOL_DESCRIPTION,
+      input_schema: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Requête de recherche, en quelques mots.' },
+        },
+        required: ['query'],
+      },
+    })
+  }
+  if (ctx.exaWebActive) {
+    tools.push({
+      name: EXA_WEB_TOOL_NAME,
+      description: EXA_WEB_TOOL_DESCRIPTION,
       input_schema: {
         type: 'object',
         properties: {
@@ -100,16 +183,21 @@ async function runAnthropic(anthropic: Anthropic, ctx: RunContext): Promise<stri
   }
 
   const messages: Anthropic.Messages.MessageParam[] = [{ role: 'user', content: ctx.userPrompt }]
+  const forcedToolName = ctx.exaDomainActive
+    ? EXA_DOMAIN_TOOL_NAME
+    : ctx.exaWebActive
+      ? EXA_WEB_TOOL_NAME
+      : null
 
-  const callOnce = async (forceExa: boolean): Promise<Anthropic.Messages.Message> => {
+  const callOnce = async (forceTool: boolean): Promise<Anthropic.Messages.Message> => {
     const response = await anthropic.messages.create({
       model: ctx.config.model,
       max_tokens: ctx.maxTokens,
       system: ctx.systemPrompt,
       messages,
       ...(tools.length ? { tools } : {}),
-      ...(forceExa
-        ? { tool_choice: { type: 'tool' as const, name: EXA_TOOL_NAME } }
+      ...(forceTool && forcedToolName
+        ? { tool_choice: { type: 'tool' as const, name: forcedToolName } }
         : {}),
     })
     ctx.usage.anthropic_in += response.usage.input_tokens
@@ -122,7 +210,7 @@ async function runAnthropic(anthropic: Anthropic, ctx: RunContext): Promise<stri
     return response
   }
 
-  let response = await callOnce(ctx.exaToolActive)
+  let response = await callOnce(!!forcedToolName)
   let iter = 0
   while (response.stop_reason === 'tool_use' && iter++ < MAX_TOOL_ITERATIONS) {
     const toolUses = response.content.filter(
@@ -132,22 +220,17 @@ async function runAnthropic(anthropic: Anthropic, ctx: RunContext): Promise<stri
 
     const toolResults: Anthropic.Messages.ToolResultBlockParam[] = []
     for (const tu of toolUses) {
-      if (tu.name === EXA_TOOL_NAME && ctx.exaToolActive && ctx.exaKey && ctx.companyDomain) {
+      const isDomain = tu.name === EXA_DOMAIN_TOOL_NAME && ctx.exaDomainActive && ctx.companyDomain
+      const isWeb = tu.name === EXA_WEB_TOOL_NAME && ctx.exaWebActive
+      if (isDomain || isWeb) {
         const input = tu.input as { query?: string }
         const query = (input.query ?? '').trim()
         try {
-          const results = await searchCompanyWebsite({
-            apiKey: ctx.exaKey,
-            query,
-            domain: ctx.companyDomain,
-            numResults: EXA_NUM_RESULTS,
-            textChars: EXA_TEXT_CHARS,
-          })
-          ctx.usage.exa_calls += 1
+          const content = await callExa(ctx, query, isDomain ? ctx.companyDomain : null)
           toolResults.push({
             type: 'tool_result',
             tool_use_id: tu.id,
-            content: formatExaResultsForLLM(results),
+            content,
           })
         } catch (err) {
           if (err instanceof ExaFatalError) {
@@ -218,11 +301,27 @@ async function runOpenAI(openai: OpenAI, ctx: RunContext): Promise<string> {
   if (ctx.config.native_web_search) {
     tools.push({ type: 'web_search_preview' })
   }
-  if (ctx.exaToolActive) {
+  if (ctx.exaDomainActive) {
     tools.push({
       type: 'function',
-      name: EXA_TOOL_NAME,
-      description: EXA_TOOL_DESCRIPTION,
+      name: EXA_DOMAIN_TOOL_NAME,
+      description: EXA_DOMAIN_TOOL_DESCRIPTION,
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: 'Requête de recherche, en quelques mots.' },
+        },
+        required: ['query'],
+        additionalProperties: false,
+      },
+      strict: true,
+    })
+  }
+  if (ctx.exaWebActive) {
+    tools.push({
+      type: 'function',
+      name: EXA_WEB_TOOL_NAME,
+      description: EXA_WEB_TOOL_DESCRIPTION,
       parameters: {
         type: 'object',
         properties: {
@@ -257,6 +356,16 @@ async function runOpenAI(openai: OpenAI, ctx: RunContext): Promise<string> {
       }
     : {}
 
+  const forcedToolName = ctx.exaDomainActive
+    ? EXA_DOMAIN_TOOL_NAME
+    : ctx.exaWebActive
+      ? EXA_WEB_TOOL_NAME
+      : null
+
+  const reasoningParam = isOpenAIReasoningModel(ctx.config.model)
+    ? { reasoning: { effort: 'low' as const } }
+    : {}
+
   let response = (await openai.responses.create({
     model: ctx.config.model,
     instructions: ctx.systemPrompt,
@@ -264,8 +373,9 @@ async function runOpenAI(openai: OpenAI, ctx: RunContext): Promise<string> {
     max_output_tokens: ctx.maxTokens,
     ...(tools.length ? { tools } : {}),
     ...textFormat,
-    ...(ctx.exaToolActive
-      ? { tool_choice: { type: 'function' as const, name: EXA_TOOL_NAME } }
+    ...reasoningParam,
+    ...(forcedToolName
+      ? { tool_choice: { type: 'function' as const, name: forcedToolName } }
       : {}),
   })) as OpenAIResponse
   accumulate(response)
@@ -280,21 +390,16 @@ async function runOpenAI(openai: OpenAI, ctx: RunContext): Promise<string> {
 
     const fnOutputs: OpenAIInputItem[] = []
     for (const fc of fnCalls) {
-      if (fc.name === EXA_TOOL_NAME && ctx.exaToolActive && ctx.exaKey && ctx.companyDomain) {
+      const isDomain = fc.name === EXA_DOMAIN_TOOL_NAME && ctx.exaDomainActive && ctx.companyDomain
+      const isWeb = fc.name === EXA_WEB_TOOL_NAME && ctx.exaWebActive
+      if (isDomain || isWeb) {
         try {
           const args = JSON.parse(fc.arguments) as { query?: string }
-          const results = await searchCompanyWebsite({
-            apiKey: ctx.exaKey,
-            query: (args.query ?? '').trim(),
-            domain: ctx.companyDomain,
-            numResults: EXA_NUM_RESULTS,
-            textChars: EXA_TEXT_CHARS,
-          })
-          ctx.usage.exa_calls += 1
+          const content = await callExa(ctx, (args.query ?? '').trim(), isDomain ? ctx.companyDomain : null)
           fnOutputs.push({
             type: 'function_call_output',
             call_id: fc.call_id,
-            output: formatExaResultsForLLM(results),
+            output: content,
           })
         } catch (err) {
           if (err instanceof ExaFatalError) {
@@ -325,6 +430,7 @@ async function runOpenAI(openai: OpenAI, ctx: RunContext): Promise<string> {
       max_output_tokens: ctx.maxTokens,
       ...(tools.length ? { tools } : {}),
       ...textFormat,
+      ...reasoningParam,
     })) as OpenAIResponse
     accumulate(response)
   }
@@ -345,34 +451,39 @@ async function generateOne(
   const company = getCompany(row, mapping)
   const websiteRaw = mapping.company_website ? (row[mapping.company_website] ?? '').trim() : ''
   const companyDomain = config.exa_company_search && exaKey ? extractDomain(websiteRaw) : null
-  const exaToolActive = !!companyDomain
+  const exaDomainActive = !!companyDomain
+  const exaWebActive = !!(config.exa_web_search && exaKey)
 
   if (config.exa_company_search) {
     if (!exaKey) {
-      console.warn(`[ENRICHMENT] exa active but no key — row "${display_name}"`)
+      console.warn(`[ENRICHMENT] exa company active but no key — row "${display_name}"`)
     } else if (!mapping.company_website) {
-      console.warn(`[ENRICHMENT] exa active but mapping.company_website not set — row "${display_name}"`)
+      console.warn(`[ENRICHMENT] exa company active but mapping.company_website not set — row "${display_name}"`)
     } else if (!websiteRaw) {
-      console.warn(`[ENRICHMENT] exa active but website cell empty — row "${display_name}"`)
+      console.warn(`[ENRICHMENT] exa company active but website cell empty — row "${display_name}"`)
     } else if (!companyDomain) {
-      console.warn(`[ENRICHMENT] exa active but domain extraction failed for "${websiteRaw}" — row "${display_name}"`)
+      console.warn(`[ENRICHMENT] exa company active but domain extraction failed for "${websiteRaw}" — row "${display_name}"`)
     }
+  }
+  if (config.exa_web_search && !exaKey) {
+    console.warn(`[ENRICHMENT] exa web active but no key — row "${display_name}"`)
   }
 
   const systemPrompt = buildSystemPrompt(config, {
     native_web_search: config.native_web_search,
-    exa_company_search: exaToolActive,
+    exa_company_search: exaDomainActive,
+    exa_web_search: exaWebActive,
   })
   const userPrompt = buildUserPrompt({ row, mapping, config })
   const isJson = needsJson(config)
-  const hasAnyTool = config.native_web_search || exaToolActive
-  const maxTokens = hasAnyTool ? 2000 : isJson ? 400 : 300
+  const maxTokens = isJson ? 2000 : 600
 
   const ctx: RunContext = {
     systemPrompt,
     userPrompt,
     config,
-    exaToolActive,
+    exaDomainActive,
+    exaWebActive,
     companyDomain,
     exaKey,
     maxTokens,
@@ -396,7 +507,7 @@ async function generateOne(
       return { row_index: 0, display_name, company, output: rawText }
     }
 
-    const jsonText = rawText.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim()
+    const jsonText = extractJsonBlock(rawText)
     try {
       const parsed = JSON.parse(jsonText) as { output?: unknown; reasoning?: string }
       const reasoning = parsed.reasoning ? String(parsed.reasoning) : undefined
@@ -459,14 +570,12 @@ async function runCompanyMode(
     await onProgress(result, Math.min(total, results.filter(Boolean).length), total)
   }
 
-  for (let i = 0; i < groupKeys.length; i += CONCURRENCY) {
-    const batch = groupKeys.slice(i, i + CONCURRENCY).map(processGroup)
-    await Promise.all(batch)
-  }
-  for (let i = 0; i < noCompanyIndexes.length; i += CONCURRENCY) {
-    const batch = noCompanyIndexes.slice(i, i + CONCURRENCY).map(processNoCompanyRow)
-    await Promise.all(batch)
-  }
+  await runWithConcurrency(groupKeys.length, async i => {
+    await processGroup(groupKeys[i]!)
+  }, CONCURRENCY)
+  await runWithConcurrency(noCompanyIndexes.length, async i => {
+    await processNoCompanyRow(noCompanyIndexes[i]!)
+  }, CONCURRENCY)
 
   return { results, usage, unit_count: totalUnits }
 }
@@ -487,7 +596,7 @@ export async function runEnrichmentBatch(options: GeneratorOptions): Promise<Gen
   if (provider === 'openai' && !openaiKey) {
     throw new Error('Clé OpenAI manquante — ajoute-la dans Settings')
   }
-  if (config.exa_company_search && !exaKey) {
+  if ((config.exa_company_search || config.exa_web_search) && !exaKey) {
     throw new Error('Clé Exa manquante — ajoute-la dans Settings')
   }
 
@@ -496,7 +605,7 @@ export async function runEnrichmentBatch(options: GeneratorOptions): Promise<Gen
   const exa = exaKey ?? null
 
   console.log(
-    `[ENRICHMENT] start mode=${config.mode} rows=${rows.length} exa=${config.exa_company_search} native_search=${config.native_web_search} model=${config.model}`,
+    `[ENRICHMENT] start mode=${config.mode} rows=${rows.length} exa_company=${config.exa_company_search} exa_web=${config.exa_web_search} native_search=${config.native_web_search} model=${config.model}`,
   )
 
   let output: GeneratorOutput
@@ -518,13 +627,7 @@ export async function runEnrichmentBatch(options: GeneratorOptions): Promise<Gen
       await onProgress(result, current, total)
     }
 
-    for (let i = 0; i < total; i += CONCURRENCY) {
-      const batch = []
-      for (let j = i; j < Math.min(i + CONCURRENCY, total); j++) {
-        batch.push(processRow(j))
-      }
-      await Promise.all(batch)
-    }
+    await runWithConcurrency(total, processRow, CONCURRENCY)
     output = { results, usage, unit_count: total }
   }
 

@@ -34,6 +34,7 @@ type PageState = 'idle' | 'testing' | 'preview' | 'generating' | 'complete' | 'e
 
 const PERSIST_DEBOUNCE_MS = 1500
 const LEAD_EMAIL_STORAGE_KEY = 'csv-enricher:lead-email'
+const IS_DEV = process.env.NODE_ENV === 'development'
 
 class HttpStreamError extends Error {
   code: string
@@ -495,7 +496,7 @@ export default function EnricherPage() {
   }, [cachedConfig, cachedRows, cachedMapping, cachedHeaders, cachedFileName, runEnrichment])
 
   const handleLaunch = useCallback(async () => {
-    if (!leadEmail) {
+    if (!leadEmail && !IS_DEV) {
       pendingActionRef.current = performLaunch
       setLeadModalOpen(true)
       return
@@ -568,7 +569,7 @@ export default function EnricherPage() {
           existingResults: stored.results,
         })
 
-        if (!leadEmail) {
+        if (!leadEmail && !IS_DEV) {
           pendingActionRef.current = resumeAction
           setLeadModalOpen(true)
           return

@@ -49,7 +49,7 @@ export async function POST(req: Request) {
   if (provider === 'openai' && !openaiKey) {
     return Response.json({ error: 'missing_openai_key' }, { status: 400 })
   }
-  if (config.exa_company_search && !exaKey) {
+  if ((config.exa_company_search || config.exa_web_search) && !exaKey) {
     return Response.json({ error: 'missing_exa_key' }, { status: 400 })
   }
 

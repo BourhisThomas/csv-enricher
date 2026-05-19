@@ -34,10 +34,10 @@ export function extractDomain(websiteUrl: string): string | null {
   }
 }
 
-export async function searchCompanyWebsite(params: {
+export async function searchExa(params: {
   apiKey: string
   query: string
-  domain: string
+  domain?: string | null
   numResults?: number
   textChars?: number
 }): Promise<ExaSearchResult[]> {
@@ -50,7 +50,7 @@ export async function searchCompanyWebsite(params: {
     },
     body: JSON.stringify({
       query,
-      includeDomains: [domain],
+      ...(domain ? { includeDomains: [domain] } : {}),
       numResults,
       contents: { text: { maxCharacters: textChars } },
     }),

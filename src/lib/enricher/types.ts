@@ -146,6 +146,7 @@ export interface EnrichmentConfig {
   instruction: string
   output_format: OutputFormat
   exa_company_search: boolean
+  exa_web_search: boolean
   native_web_search: boolean
   model: EnricherModel
   include_reasoning: boolean

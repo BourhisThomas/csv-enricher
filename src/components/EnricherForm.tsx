@@ -142,7 +142,8 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
   const [outputFormat, setOutputFormat] = useState<OutputFormat>(initialState?.config.output_format ?? 'text')
   const [customFields, setCustomFields] = useState<CustomInputField[]>(initialState?.config.custom_fields ?? [])
   const [exaCompanySearch, setExaCompanySearch] = useState(initialState?.config.exa_company_search ?? false)
-  const nativeWebSearch = false
+  const [exaWebSearch, setExaWebSearch] = useState(initialState?.config.exa_web_search ?? false)
+  const [nativeWebSearch, setNativeWebSearch] = useState(initialState?.config.native_web_search ?? false)
   const [model, setModel] = useState<EnricherModel>(initialState?.config.model ?? DEFAULT_MODEL)
   const [includeReasoning, setIncludeReasoning] = useState(initialState?.config.include_reasoning ?? true)
   const [additionalNotes, setAdditionalNotes] = useState(initialState?.config.additional_notes ?? '')
@@ -240,6 +241,7 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
       instruction: instruction.trim(),
       output_format: outputFormat,
       exa_company_search: exaCompanySearch,
+      exa_web_search: exaWebSearch,
       native_web_search: nativeWebSearch,
       model,
       include_reasoning: includeReasoning,
@@ -543,6 +545,41 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
                   <Link href="/settings">Réglages</Link>.
                 </div>
               )}
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={exaWebSearch}
+                  onChange={e => setExaWebSearch(e.target.checked)}
+                />
+                <span className="track" />
+                <span className="body">
+                  <span className="lbl">Exa · web ouvert</span>
+                  <span className="hint">
+                    recherche sur tout le web (news, articles, profils) · pas besoin de site mappé
+                  </span>
+                </span>
+              </label>
+              {exaWebSearch && !exaKey && (
+                <div style={{ fontSize: 12, color: 'var(--cherry)', marginLeft: 50 }}>
+                  ⚠ Aucune clé Exa configurée — ajoute-la dans{' '}
+                  <Link href="/settings">Réglages</Link>.
+                </div>
+              )}
+              <label className="switch">
+                <input
+                  type="checkbox"
+                  checked={nativeWebSearch}
+                  onChange={e => setNativeWebSearch(e.target.checked)}
+                />
+                <span className="track" />
+                <span className="body">
+                  <span className="lbl">Recherche web native</span>
+                  <span className="hint">
+                    via le provider du modèle · couvre tout le web · plus cher (
+                    {getModel(model)?.provider === 'openai' ? '~0,025 €/appel' : '~0,01 €/appel'})
+                  </span>
+                </span>
+              </label>
             </div>
 
             <div className="stack-3">

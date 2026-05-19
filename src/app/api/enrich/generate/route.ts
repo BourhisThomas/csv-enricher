@@ -11,12 +11,14 @@ import {
   checkRateLimit,
   findLeadByEmail,
   recordEnrichment,
+  type LeadRecord,
 } from '@/lib/notion/leads'
 import { validateProEmail } from '@/lib/email/validate'
 
 export const maxDuration = 300
 
 const MAX_ROWS = 1000
+const IS_DEV = process.env.NODE_ENV === 'development'
 
 function validateConfig(
   config: EnrichmentConfig | undefined,
@@ -36,32 +38,36 @@ export async function POST(req: Request) {
   const exaKey = req.headers.get('x-exa-api-key') || undefined
   const leadEmailHeader = req.headers.get('x-lead-email') || ''
 
-  const emailCheck = validateProEmail(leadEmailHeader)
-  if (!emailCheck.ok) {
-    return Response.json({ error: 'gate_required' }, { status: 401 })
-  }
+  let lead: LeadRecord | null = null
+  if (!IS_DEV) {
+    const emailCheck = validateProEmail(leadEmailHeader)
+    if (!emailCheck.ok) {
+      return Response.json({ error: 'gate_required' }, { status: 401 })
+    }
 
-  let lead
-  try {
-    lead = await findLeadByEmail(emailCheck.email!)
-  } catch (err) {
-    console.error('[GENERATE] lead lookup failed:', err)
-    return Response.json({ error: 'lead_lookup_failed' }, { status: 502 })
-  }
-  if (!lead) {
-    return Response.json({ error: 'gate_required' }, { status: 401 })
-  }
+    try {
+      lead = await findLeadByEmail(emailCheck.email!)
+    } catch (err) {
+      console.error('[GENERATE] lead lookup failed:', err)
+      return Response.json({ error: 'lead_lookup_failed' }, { status: 502 })
+    }
+    if (!lead) {
+      return Response.json({ error: 'gate_required' }, { status: 401 })
+    }
 
-  const decision = checkRateLimit(lead)
-  if (!decision.allowed) {
-    return Response.json(
-      {
-        error: 'rate_limited',
-        retry_after_ms: decision.retryAfterMs,
-        next_available_at: decision.nextAvailableAt?.toISOString(),
-      },
-      { status: 429 },
-    )
+    const decision = checkRateLimit(lead)
+    if (!decision.allowed) {
+      return Response.json(
+        {
+          error: 'rate_limited',
+          retry_after_ms: decision.retryAfterMs,
+          next_available_at: decision.nextAvailableAt?.toISOString(),
+        },
+        { status: 429 },
+      )
+    }
+  } else {
+    console.log('[GENERATE] dev mode: skipping lead gate')
   }
 
   let body: { rows: CsvRow[]; mapping: FieldMapping; config: EnrichmentConfig }
@@ -84,7 +90,7 @@ export async function POST(req: Request) {
   if (provider === 'openai' && !openaiKey) {
     return Response.json({ error: 'missing_openai_key' }, { status: 400 })
   }
-  if (config.exa_company_search && !exaKey) {
+  if ((config.exa_company_search || config.exa_web_search) && !exaKey) {
     return Response.json({ error: 'missing_exa_key' }, { status: 400 })
   }
 
@@ -95,9 +101,11 @@ export async function POST(req: Request) {
     )
   }
 
-  recordEnrichment(lead.pageId, lead.nbEnrichments).catch(err =>
-    console.error('[GENERATE] recordEnrichment failed:', err),
-  )
+  if (lead) {
+    recordEnrichment(lead.pageId, lead.nbEnrichments).catch(err =>
+      console.error('[GENERATE] recordEnrichment failed:', err),
+    )
+  }
 
   const { readable, writable } = new TransformStream()
   const writer = writable.getWriter()

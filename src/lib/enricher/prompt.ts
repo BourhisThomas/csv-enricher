@@ -94,9 +94,14 @@ export function needsJson(config: EnrichmentConfig): boolean {
 
 export function buildSystemPrompt(
   config: EnrichmentConfig,
-  toolsAvailable: { native_web_search: boolean; exa_company_search: boolean } = {
+  toolsAvailable: {
+    native_web_search: boolean
+    exa_company_search: boolean
+    exa_web_search: boolean
+  } = {
     native_web_search: false,
     exa_company_search: false,
+    exa_web_search: false,
   },
 ): string {
   const subject =
@@ -108,6 +113,11 @@ export function buildSystemPrompt(
   if (toolsAvailable.exa_company_search) {
     toolClauses.push(
       'Tu as accès à un outil `search_company_website(query)` qui recherche dans les pages publiques du site web de l\'entreprise (restreint à son domaine). APPELLE CET OUTIL pour vérifier des éléments concrets avant de conclure : services, équipe, pricing, case studies, offres d\'emploi, mentions légales, etc. Queries courtes et ciblées (1-3 mots clés). NE conclus JAMAIS "je ne peux pas accéder au site" sans avoir d\'abord essayé l\'outil — il est disponible et fonctionnel.',
+    )
+  }
+  if (toolsAvailable.exa_web_search) {
+    toolClauses.push(
+      'Tu as accès à un outil `search_web(query)` qui fait une recherche web ouverte via Exa (tout le web, sans restriction de domaine). À utiliser pour des news récentes, articles externes, profils publics, ou toute info hors du site officiel de l\'entreprise. Queries courtes et ciblées. Cite tes sources (URL, date) dans le reasoning quand demandé.',
     )
   }
   if (toolsAvailable.native_web_search) {
