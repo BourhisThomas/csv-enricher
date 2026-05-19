@@ -46,7 +46,7 @@ export async function POST(req: Request) {
     }
 
     try {
-      lead = await findLeadByEmail(emailCheck.email!)
+      lead = await findLeadByEmail(emailCheck.email!, { retries: true })
     } catch (err) {
       console.error('[GENERATE] lead lookup failed:', err)
       return Response.json({ error: 'lead_lookup_failed' }, { status: 502 })

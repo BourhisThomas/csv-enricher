@@ -83,6 +83,7 @@ export default function LeadCaptureModal({ open, onClose, onCaptured }: Props) {
         setSubmitting(false)
         return
       }
+      setSubmitting(false)
       onCaptured(trimmedEmail)
     } catch {
       setError('Erreur réseau. Réessaie dans un instant.')

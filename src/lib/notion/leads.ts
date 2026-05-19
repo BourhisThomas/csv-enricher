@@ -98,26 +98,38 @@ function mapPage(page: NotionPage): LeadRecord {
   }
 }
 
-export async function findLeadByEmail(email: string): Promise<LeadRecord | null> {
+export interface FindLeadOptions {
+  retries?: boolean
+}
+
+export async function findLeadByEmail(
+  email: string,
+  opts?: FindLeadOptions,
+): Promise<LeadRecord | null> {
   const { databaseId } = notionEnv()
   const normalized = email.trim().toLowerCase()
-  const res = await notionFetch(`/databases/${databaseId}/query`, {
-    method: 'POST',
-    body: JSON.stringify({
-      filter: {
-        property: 'Email',
-        title: { equals: normalized },
-      },
-      page_size: 1,
-    }),
-  })
-  if (!res.ok) {
-    const text = await res.text().catch(() => '')
-    throw new Error(`notion_query_failed: ${res.status} ${text}`)
+  const delaysMs = opts?.retries ? [0, 400, 1200] : [0]
+
+  for (const delay of delaysMs) {
+    if (delay > 0) await new Promise(r => setTimeout(r, delay))
+    const res = await notionFetch(`/databases/${databaseId}/query`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filter: {
+          property: 'Email',
+          title: { equals: normalized },
+        },
+        page_size: 1,
+      }),
+    })
+    if (!res.ok) {
+      const text = await res.text().catch(() => '')
+      throw new Error(`notion_query_failed: ${res.status} ${text}`)
+    }
+    const data = (await res.json()) as { results: NotionPage[] }
+    if (data.results?.length) return mapPage(data.results[0]!)
   }
-  const data = (await res.json()) as { results: NotionPage[] }
-  if (!data.results?.length) return null
-  return mapPage(data.results[0]!)
+  return null
 }
 
 export async function createLead(input: LeadInput): Promise<LeadRecord> {

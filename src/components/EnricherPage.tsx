@@ -210,6 +210,7 @@ export default function EnricherPage() {
 
   const [leadEmail, setLeadEmail] = useState<string | null>(null)
   const [leadModalOpen, setLeadModalOpen] = useState(false)
+  const leadEmailRef = useRef<string | null>(null)
 
   const snapshotRef = useRef<StoredJob | null>(null)
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -218,7 +219,10 @@ export default function EnricherPage() {
     if (typeof window === 'undefined') return
     try {
       const stored = window.localStorage.getItem(LEAD_EMAIL_STORAGE_KEY)
-      if (stored) setLeadEmail(stored)
+      if (stored) {
+        setLeadEmail(stored)
+        leadEmailRef.current = stored
+      }
     } catch { /* ignore */ }
   }, [])
 
@@ -278,9 +282,9 @@ export default function EnricherPage() {
     if (anthropicKey) h['X-Anthropic-Api-Key'] = anthropicKey
     if (openaiKey) h['X-OpenAI-Api-Key'] = openaiKey
     if (exaKey) h['X-Exa-Api-Key'] = exaKey
-    if (opts?.withLead && leadEmail) h['X-Lead-Email'] = leadEmail
+    if (opts?.withLead && leadEmailRef.current) h['X-Lead-Email'] = leadEmailRef.current
     return h
-  }, [anthropicKey, openaiKey, exaKey, leadEmail])
+  }, [anthropicKey, openaiKey, exaKey])
 
   const handleFormSubmit = useCallback(
     async ({ rows, mapping, config, fileName, headers }: { rows: CsvRow[]; mapping: FieldMapping; config: EnrichmentConfig; fileName: string; headers: string[] }) => {
@@ -465,6 +469,7 @@ export default function EnricherPage() {
           setError(errorMessageFor(err.code, err.data))
           if (err.code === 'gate_required') {
             try { window.localStorage.removeItem(LEAD_EMAIL_STORAGE_KEY) } catch { /* ignore */ }
+            leadEmailRef.current = null
             setLeadEmail(null)
           }
         } else {
@@ -507,6 +512,7 @@ export default function EnricherPage() {
   const handleLeadCaptured = useCallback(
     async (email: string) => {
       try { window.localStorage.setItem(LEAD_EMAIL_STORAGE_KEY, email) } catch { /* ignore */ }
+      leadEmailRef.current = email
       setLeadEmail(email)
       setLeadModalOpen(false)
       const action = pendingActionRef.current
