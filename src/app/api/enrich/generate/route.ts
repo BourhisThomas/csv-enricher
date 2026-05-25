@@ -17,7 +17,7 @@ import { validateProEmail } from '@/lib/email/validate'
 
 export const maxDuration = 300
 
-const MAX_ROWS = 1000
+const MAX_ROWS = 2000
 const IS_DEV = process.env.NODE_ENV === 'development'
 
 function validateConfig(

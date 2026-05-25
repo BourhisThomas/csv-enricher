@@ -161,7 +161,7 @@ function errorMessageFor(code: string, data?: Record<string, unknown>): string {
     case 'missing_openai_key':
       return 'Clé OpenAI manquante. Ajoute-la dans Réglages.'
     case 'too_many_rows':
-      return 'Fichier trop volumineux (limite : 1000 lignes par batch).'
+      return 'Fichier trop volumineux (limite : 2000 lignes par batch).'
     case 'missing_instruction':
       return 'Instruction manquante.'
     case 'missing_exa_key':

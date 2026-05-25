@@ -40,7 +40,7 @@ Un `public/sample.csv` est fourni pour tester immédiatement.
 
 ## Limites
 
-- Cap par batch : 1000 lignes (configurable dans `src/app/api/enrich/generate/route.ts`)
+- Cap par batch : 2000 lignes (configurable dans `src/app/api/enrich/generate/route.ts`)
 - Concurrence : 3 appels LLM en parallèle (configurable dans `src/lib/enricher/generator.ts`)
 - L'app ne stocke rien : si tu fermes l'onglet pendant un run, tu perds les résultats partiels
 

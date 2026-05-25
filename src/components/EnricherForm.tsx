@@ -262,7 +262,7 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
       {/* I · Source */}
       <div className="section">
         <h2><span className="n">I.</span>Source</h2>
-        <span className="meta">CSV · 1 000 lignes max</span>
+        <span className="meta">CSV · 2 000 lignes max</span>
       </div>
 
       {fileName ? (
@@ -302,7 +302,7 @@ export default function EnricherForm({ onSubmit, disabled, initialState }: Props
           <div>
             <div className="ti">Dépose ton CSV</div>
             <div className="desc">
-              jusqu&apos;à 1 000 lignes · <b>données 100% locales</b>
+              jusqu&apos;à 2 000 lignes · <b>données 100% locales</b>
             </div>
           </div>
           <button type="button" className="btn btn-secondary" onClick={e => { e.stopPropagation(); fileRef.current?.click() }}>
