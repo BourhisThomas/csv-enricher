@@ -15,6 +15,11 @@ import {
 } from './types'
 
 const CONCURRENCY = 5
+// OpenAI tier 1 has low RPM/TPM limits — keep fewer requests in flight and let
+// the SDK back off on 429s (it honours the Retry-After header) instead of
+// failing rows.
+const OPENAI_CONCURRENCY = 3
+const OPENAI_MAX_RETRIES = 8
 const MAX_TOOL_ITERATIONS = 5
 
 function isOpenAIReasoningModel(modelId: string): boolean {
@@ -530,6 +535,7 @@ async function runCompanyMode(
   openai: OpenAI | null,
   exaKey: string | null,
   usage: ApiUsage,
+  concurrency: number,
 ): Promise<GeneratorOutput> {
   const { rows, mapping, config, onProgress } = options
   const total = rows.length
@@ -572,10 +578,10 @@ async function runCompanyMode(
 
   await runWithConcurrency(groupKeys.length, async i => {
     await processGroup(groupKeys[i]!)
-  }, CONCURRENCY)
+  }, concurrency)
   await runWithConcurrency(noCompanyIndexes.length, async i => {
     await processNoCompanyRow(noCompanyIndexes[i]!)
-  }, CONCURRENCY)
+  }, concurrency)
 
   return { results, usage, unit_count: totalUnits }
 }
@@ -601,8 +607,12 @@ export async function runEnrichmentBatch(options: GeneratorOptions): Promise<Gen
   }
 
   const anthropic = anthropicKey ? new Anthropic({ apiKey: anthropicKey }) : null
-  const openai = openaiKey ? new OpenAI({ apiKey: openaiKey }) : null
+  const openai = openaiKey
+    ? new OpenAI({ apiKey: openaiKey, maxRetries: OPENAI_MAX_RETRIES })
+    : null
   const exa = exaKey ?? null
+
+  const concurrency = provider === 'openai' ? OPENAI_CONCURRENCY : CONCURRENCY
 
   console.log(
     `[ENRICHMENT] start mode=${config.mode} rows=${rows.length} exa_company=${config.exa_company_search} exa_web=${config.exa_web_search} native_search=${config.native_web_search} model=${config.model}`,
@@ -610,7 +620,7 @@ export async function runEnrichmentBatch(options: GeneratorOptions): Promise<Gen
 
   let output: GeneratorOutput
   if (config.mode === 'company') {
-    output = await runCompanyMode(options, anthropic, openai, exa, usage)
+    output = await runCompanyMode(options, anthropic, openai, exa, usage, concurrency)
   } else {
     const { mapping, onProgress } = options
     const total = rows.length
@@ -627,7 +637,7 @@ export async function runEnrichmentBatch(options: GeneratorOptions): Promise<Gen
       await onProgress(result, current, total)
     }
 
-    await runWithConcurrency(total, processRow, CONCURRENCY)
+    await runWithConcurrency(total, processRow, concurrency)
     output = { results, usage, unit_count: total }
   }
 
